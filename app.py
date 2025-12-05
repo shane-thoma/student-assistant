@@ -2,213 +2,229 @@ import streamlit as st
 from google import genai
 from google.genai import types
 import time
-import json
+import os
 
 # Set up page configuration
-st.set_page_config(page_title="Student Agent Hub", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="The Student Assistant", page_icon="🧠", layout="wide")
 
-# Helper function
-def clear_chat_history():
-    """Clears the chat history state."""
-    st.session_state.chat_history = []
+# Custom CSS for Layout
+st.markdown("""
+<style>
+    .main-header { font-size: 2.5rem; color: #4F8BF9; text-align: center; margin-bottom: 1rem; }
+    .success-text { color: #28a745; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
 
-# API key handling
-# Try to get the key from Streamlit Secrets (Environment Variable)
+# API Key Handling
+client = None
 if "GEMINI_API_KEY" in st.secrets:
+    # If the API Key is available in Streamlit Secrets, use it
     api_key = st.secrets["GEMINI_API_KEY"]
-    # Automatically configure the API key if the key is found in secrets
     client = genai.Client(api_key=api_key)
-    st.sidebar.success("✅ AI Connected (Universal Key)")
 else:
-    # Fallback: If no secret is set, ask the user in the sidebar
-    st.sidebar.title("🤖 Agent Settings")
-    api_key = st.sidebar.text_input("Enter Google Gemini API Key", type="password")
-    if api_key:
-        client = genai.Client(api_key=api_key)
-    else:
-        st.sidebar.warning("⚠️ API Key required for live AI responses.")
-        st.sidebar.info("Get your free key at [aistudio.google.com](https://aistudio.google.com/)")
+    # If the API Key is not available, allow the user to enter their own
+    with st.sidebar:
+        st.title("🔐 Authorization")
+        api_key = st.text_input("Gemini API Key", type="password")
+        if api_key:
+            client = genai.Client(api_key=api_key)
+            st.success("API Key loaded!")
+        else:
+            st.warning("API Key required.")
 
-# Allow user to choose which agent they want to use
-choice = st.sidebar.radio("Choose your Assistant:", 
-    ["📅 Syllabus Slayer", "⚔️ Devil's Advocate", "📚 Recursive Researcher"])
+# Session State Initialization
+if "uploaded_file_ref" not in st.session_state:
+    st.session_state.uploaded_file_ref = None
+if "current_file_name" not in st.session_state:
+    st.session_state.current_file_name = None
+if "workflow_status" not in st.session_state:
+    st.session_state.workflow_status = "idle" # idle, processing, done
+if "concept_map" not in st.session_state:
+    st.session_state.concept_map = None
+if "flashcards_csv" not in st.session_state:
+    st.session_state.flashcards_csv = None
+if "quiz_history" not in st.session_state:
+    st.session_state.quiz_history = []
 
-# Set the initial last agent used
-if "last_agent" not in st.session_state:
-    st.session_state.last_agent = choice
-
-# Clear Devil's Advocate chat history when switching between agents
-if st.session_state.last_agent != choice:
-    clear_chat_history()
-    st.session_state.last_agent = choice
-
-# Gemini API caller
-def get_gemini_response(prompt, config=None, model_name="gemini-2.0-flash"):
+# Gemini Caller
+def generate(prompt, content_part=None, model="gemini-2.0-flash"):
     """
-    Calls the Gemini API with the given prompt, configuration, and model.
+    Call Gemini API to generate content based on the prompt and provided file data.
     
-    :param prompt: The prompt to provide to Gemini. Can include images.
-    :param config: The configuration for Gemini, used to allow for image processing. Defaults to None.
-    :param model_name: The Gemini model to use. Defaults to "gemini-2.0-flash".
+    :param prompt: The text prompt for generating content.
+    :param content_part: The file data bytes for additional context.
+    :param model: The model to use for content generation.
+    :return: The generated content text or an error message if an exception occurs.
     """
-    if not api_key:
-        return "⚠️ Please enter a valid API Key in the sidebar to generate a real response."
+    if not client: return "Error: No API Key"
     try:
+        contents = [prompt]
+        if content_part:
+            contents.append(content_part)
+        
         response = client.models.generate_content(
-            model=model_name, contents=prompt, config=config)
+            model=model,
+            contents=contents
+        )
         return response.text
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
 
-# Agent 1: Syllabus Slayer
-if choice == "📅 Syllabus Slayer":
-    st.title("📅 Syllabus Slayer")
-    st.markdown("I convert your syllabus into a concrete action plan.")
+# Main UI
 
-    uploaded_file = st.file_uploader("Upload Syllabus (PDF or Image)", type=['png', 'jpg', 'jpeg', 'pdf', 'txt'])
+st.markdown('<div class="main-header">🧠 The Student Assistant</div>', unsafe_allow_html=True)
+
+# Section for uploading lecture content to use for agentic workflow
+st.write("### 📂 Step 1: Upload Source Material")
+uploaded_file = st.file_uploader(
+    "Upload Lecture (Audio/Video), Slides (PDF), or Notes (Image)", 
+    type=['pdf', 'txt', 'png', 'jpg', 'mp3', 'wav', 'mp4']
+)
+
+# Handle new uploaded files
+if uploaded_file and uploaded_file.name != st.session_state.current_file_name:
+    # Reset session state variables
+    st.session_state.uploaded_file_ref = None
+    st.session_state.workflow_status = "idle"
+    st.session_state.concept_map = None
+    st.session_state.flashcards_csv = None
+    st.session_state.quiz_history = []
+
+    # Process the new file
+    with st.spinner("Uploading and processing file..."):
+        try:
+            file_bytes = uploaded_file.getvalue()
+            st.session_state.uploaded_file_ref = types.Part.from_bytes(
+                data=file_bytes,
+                mime_type=uploaded_file.type
+            )
+            st.session_state.current_file_name = uploaded_file.name
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
+
+# Detect file removal and reset session state variables
+if not uploaded_file and st.session_state.uploaded_file_ref:
+    st.session_state.uploaded_file_ref = None
+    st.session_state.current_file_name = None
+    st.session_state.workflow_status = "idle"
+    st.session_state.concept_map = None
+    st.session_state.flashcards_csv = None
+    st.session_state.quiz_history = []
+    st.rerun()
+
+# After the user has uploaded a file...
+if st.session_state.uploaded_file_ref:
     
-    if uploaded_file and st.button("Analyze & Plan"):
-        with st.spinner("Gemini is reading the document..."):
-            # Simple text extraction for a text file
-            if uploaded_file.type == "text/plain":
-                file_content = str(uploaded_file.read(), "utf-8")
-                
-                prompt = f"""
-                You are an expert Academic Project Manager. Analyze this syllabus content:
-                ---
-                {file_content}
-                ---
-                Identify all deadlines. Then, create 'Ghost Tasks' (prep work) for each.
-                Output the result as a Markdown table with columns: Date, Task, Type (Hard Deadline/Ghost Task).
-                """
-                
-                response = get_gemini_response(prompt)
-                st.markdown(response)
-                
-            # Data extraction for a PDF/image file
-            else:
-                file_part = types.Part.from_bytes(
-                    data=uploaded_file.getvalue(),
-                    mime_type=uploaded_file.type
-                )
-                text_prompt = f"""
-                You are an expert Academic Project Manager. Analyze this syllabus documnent provided above.
+    # If workflow hasn't run yet, show the Launch Button
+    if st.session_state.workflow_status == "idle":
+        st.info("File uploaded successfully. Ready to analyze.")
+        if st.button("Launch Student Assistant Agent", type="primary"):
+            st.session_state.workflow_status = "processing"
+            st.rerun()
 
-                YOUR TASKS:
-                1. Identify all explicit deadlines (Exams, Papers, Assignments).
-                2. For every deadline, create a 'Ghost Task' (preparation step) that is due 3-7 days before the real deadline.
-                
-                OUTPUT FORMAT:
-                Do not add any additional text. Place the Ghost Tasks before their associated Deadlines.
-                Provide only a Markdown table with these columns:
-                | Date | Task Name | Type (Deadline vs. Ghost Task) |
-                """
-
-                # Provide both the file data and the text prompt to Gemini
-                response = get_gemini_response([file_part, text_prompt])
-                st.markdown(response)
-
-
-# Agent 2: Devil's Advocate
-elif choice == "⚔️ Devil's Advocate":
-    st.title("⚔️ Devil's Advocate")
-    st.markdown("I will challenge your thesis to prepare you for defense.")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        persona = st.selectbox("Select Opponent Persona:", 
-            ["The Skeptic (Demands Evidence)", "The 5-Year Old (Needs Simplicity)", "The Logical Vulcan (Finds Fallacies)"])
-    with col2:
-        topic = st.text_input("What is your topic/thesis?", on_change=clear_chat_history)
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    # Display chat
-    for role, message in st.session_state.chat_history:
-        with st.chat_message(role):
-            st.markdown(message)
-
-    if user_input := st.chat_input("Argue your point..."):
-        # User message
-        st.session_state.chat_history.append(("user", user_input))
-        with st.chat_message("user"):
-            st.markdown(user_input)
-
-        # Agent response
-        if api_key:
-            with st.chat_message("assistant"):
-                with st.spinner("Opponent is thinking..."):
-                    # Construct conversation history for context
-                    history_text = "\n".join([f"{role}: {msg}" for role, msg in st.session_state.chat_history])
-                    
-                    system_instruction = f"""
-                    You are debating the user. Your persona is: {persona}.
-                    The topic is: {topic}.
-                    Keep responses short (under 3 sentences) and challenging.
-                    Do not be mean, but be rigorous. Find weak points in their logic.
-                    """
-                    
-                    full_prompt = f"{system_instruction}\n\nConversation so far:\n{history_text}\n\nRespond to the last user message:"
-                    
-                    response_text = get_gemini_response(full_prompt, model_name="gemini-2.0-flash-lite")
-                    st.markdown(response_text)
-                    st.session_state.chat_history.append(("assistant", response_text))
-        else:
-            st.warning("Please enter API Key to start the debate.")
-
-
-# Agent 3: Recursive Researcher
-elif choice == "📚 Recursive Researcher":
-    st.title("📚 Recursive Researcher")
-    st.markdown("I perform multi-step research to help you better understand a topic.")
-    
-    query = st.text_input("Enter your research topic:")
-    
-    if query and st.button("Start Deep Research"):
-        if not api_key:
-            st.error("API Key required.")
-        else:
-            st.write(f"### Investigating: {query}")
+    # If workflow is processing, run the sequential agent steps
+    elif st.session_state.workflow_status == "processing":
+        with st.status("Agent Orchestrating Workflow...", expanded=True) as status:
             
-            # Decompose the Topic into Sub-Topics
-            st.write("1. 🧠 **Decomposing Query** into sub-questions...")
-            decomposition_prompt = f"Break this research topic into 3 specific search queries: '{query}'. Return only the queries separated by commas."
-            sub_queries = str(get_gemini_response(decomposition_prompt)).split(',')
-            
-            for q in sub_queries:
-                st.text(f"  - Planning to search: {q.strip()}")
-            
-            # Research the Topic by Sub-Topics
-            st.write("2. 🔍 **Performing Search & Synthesis**...")
-            progress_bar = st.progress(0)
-            
-            # Create a prompt to perform deep research with citations
-            synthesis_prompt = f"""
-            Write a research summary on '{query}'.
-            Structure it based on the results of researching these sub-questions: {sub_queries}.
-            Provide website links for all sources used in the summary.
+            # Step 1: Concept Map Synthesis
+            st.write("**Analysis Agent:** Reading content and generating a Concept Map...")
+            summary_prompt = """
+            Analyze the attached material deeply.
+            Create a 'Concept Map' Summary:
+            1. **Main Topic**: What is this primarily about?
+            2. **Core Concepts**: List the top 5-20 most important terms with definitions.
+            3. **The 'Aha!' Moment**: The most complex idea explained simply.
             """
-
-            progress_bar.progress(10)
+            st.session_state.concept_map = generate(summary_prompt, st.session_state.uploaded_file_ref)
+            st.write("Concept Map generated.")
             
-            # Google Search Tool
-            grounding_tool = types.Tool(
-                google_search=types.GoogleSearch()
-            )
-
-            progress_bar.progress(30)
-
-            # Configuration to allow the model to search the web for info
-            model_config = types.GenerateContentConfig(
-                tools=[grounding_tool]
-            )
-
-            progress_bar.progress(50)
-
-            final_report = get_gemini_response(synthesis_prompt, config=model_config)
-            progress_bar.progress(100)
+            # Step 2: Flashcard Generation
+            st.write("**Flashcard Agent:** Extracting key terms for Flashcards...")
+            flashcard_prompt = """
+            Create a CSV formatted list of flashcards from this content.
+            The flashcards should be useful for studying the main course content covered and not any unrelevant information.
+            Format: "Front","Back"
+            Generate 20 cards. No markdown code blocks and no escaping characters, just raw CSV.
+            """
+            st.session_state.flashcards_csv = generate(flashcard_prompt, st.session_state.uploaded_file_ref)
+            st.write("Flashcards created.")
             
-            st.markdown("### 📝 Final Report")
-            st.markdown(final_report)
+            # Step 3: Quiz Initialization
+            st.write("**Quiz Agent:** Priming quiz engine...")
+            q1_prompt = """
+            You are a rigorous but fair tutor providing a practice quiz to a student. 
+            Ask me the first distinct question based on the uploaded file. Do not give the answer.
+            """
+            first_question = generate(q1_prompt, st.session_state.uploaded_file_ref)
+            st.session_state.quiz_history = [("assistant", first_question)]
+            st.write("Tutor ready.")
+            
+            status.update(label="Workflow Complete! Dashboard Ready.", state="complete", expanded=False)
+            
+            st.session_state.workflow_status = "done"
+            time.sleep(1)
+            st.rerun()
+
+    # Dashboard View
+    elif st.session_state.workflow_status == "done":
+        
+        # 2-column layout for Concept Map & Flashcards
+        col1, col2 = st.columns([0.6, 0.4])
+        
+        with col1:
+            with st.container():
+                st.subheader("📖 Concept Map")
+                # Use expander so it doesn't dominate the page when unused
+                # Start with expander collapsed to avoid auto-scrolling to the bottom
+                with st.expander("View Summary Notes", expanded=False):
+                    st.markdown(st.session_state.concept_map)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        with col2:
+            with st.container():
+                st.subheader("⚡ Study Flashcards")
+                st.success(f"Generated 20 Flashcards")
+                st.download_button(
+                    label="Download Anki/CSV Deck",
+                    data=str(st.session_state.flashcards_csv),
+                    file_name="flashcards.csv",
+                    mime="text/csv"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        # Use full page width for the Interactive Quiz
+        st.markdown("---")
+        st.subheader("👨‍🏫 Interactive Quiz")
+        st.caption("The agent has prepared a quiz based on your specific file. Answer below.")
+        
+        # Chat Interface
+        chat_container = st.container()
+        with chat_container:
+            for role, text in st.session_state.quiz_history:
+                with st.chat_message(role):
+                    st.markdown(text)
+
+        # Input handling
+        if user_answer := st.chat_input("Answer the quiz question..."):
+            st.session_state.quiz_history.append(("user", user_answer))
+            with st.chat_message("user"):
+                st.markdown(user_answer)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Grading..."):
+                    # Construct context for the grading agent
+                    history_text = "\n".join([f"{role}: {text}" for role, text in st.session_state.quiz_history])
+                    grading_prompt = f"""
+                    Context: The user is answering a quiz based on the uploaded file.
+                    History: {history_text}
+                    
+                    Task:
+                    1. Grade the user's last answer based strictly on the file.
+                    2. If wrong, explain why briefly.
+                    3. Ask the NEXT distinct question.
+                    """
+                    response = generate(grading_prompt, st.session_state.uploaded_file_ref)
+                    st.markdown(response)
+                    st.session_state.quiz_history.append(("assistant", response))
