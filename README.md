@@ -1,6 +1,6 @@
 # Student Assistant
 
-This is a multi-step AI agent that helps automate the workflow of studying for a student.
+This is a multi-step AI agent that helps automate the workflow of creating study materials for a student.
 
 ## Use Instructions
 
